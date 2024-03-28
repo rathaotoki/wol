@@ -1,0 +1,82 @@
+#! env python
+
+import socket
+import struct
+from traceback import print_exc
+
+import yaml
+import argparse
+
+f_verbose = False
+
+def v_print(msg):
+    global f_verbose
+    if f_verbose:
+        print(msg)
+
+def send_magic_packet(mac, port=7):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+        mac_mod = mac.upper().replace("-", "").replace("_", "").replace(":", "")
+        if len(mac_mod) != 12:
+            raise Exception("invalid MAC address: {}".format(mac))
+
+        buf = b'f' * 12 + (mac_mod * 20).encode()
+        magic_pc = b''
+
+        for i in range(0, len(buf), 2):
+            magic_pc += struct.pack('B', int(buf[i:i+2], 16))
+
+        v_print("sending magic packet...")
+        s.sendto(magic_pc, ('<broadcast>', port))
+
+def load_yaml(filepath):
+    with open(filepath, 'r') as f:
+        data = yaml.safe_load(f)
+        v_print("config loaded from {}".format(filepath))
+    return data
+
+def def_settings():
+    defaults = {
+            'wol': {
+                'version': 1,
+                'port': 7,
+                'hosts':{}
+                }
+            }
+    return defaults
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(description = "WakeOnLan Magic packet send command")
+    parser.add_argument('Target', type=str, nargs='+', help='Target names to be waked up')
+    parser.add_argument('-p', '--port', type=int, help='Port number')
+    parser.add_argument('-v', '--verbose', action='store_true', help='vervose')
+    parser.add_argument('-f', '--file', type=str, default="wol_macs.yaml", help='setting yaml file')
+    args = vars(parser.parse_args())
+
+    if args['verbose']:
+        f_verbose = True
+
+    try:
+        data = def_settings() | load_yaml(args['file'])
+        print(data)
+        print(args)
+        port = 0
+
+        if 'port' in args:
+            port = args['port']
+        else:
+            port = data['wol']['port']
+        v_print("using port {}".format(port))
+        
+        for T in args["Target"]:
+            mac_addr = data['wol']['hosts'][T]['mac']
+            v_print("Target {} : mac = {}".format(T, mac_addr))
+
+            send_magic_packet(mac_addr)
+
+    except Exception:
+        print_exc()
+

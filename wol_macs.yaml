@@ -1,0 +1,10 @@
+wol:
+  version: 1
+  port: 7
+  hosts:
+    ratha-calc:
+      mac: "18:ec:e7:a5:37:cb"
+      ip: "172.16.10.3"
+    fuyou:
+      mac: ""
+      ip: "172.16.10.1"
