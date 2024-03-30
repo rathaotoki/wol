@@ -1,0 +1,30 @@
+wol:
+  version: 1
+  default:
+    port: 7
+    ip: "255.255.255.255"
+  hosts:
+    pc1:
+      mac: "AB:CD:EF:01:12:45"
+    pc2:
+      mac: "AB:CD:EF:01:12:50"
+    srv1:
+      mac: "12:34:56:78:90:AA"
+      ip: "172.16.255.255"
+    srv2:
+      mac: "12:34:56:78:90:BB"
+      ip: "172.16.255.255"
+  groups:
+    pcs:
+      - pc1
+      - pc2
+    servers:
+      - srv1
+      - srv2
+    all:
+      - pc1
+      - pc2
+      - srv1
+      - srv2
+
+
