@@ -1,5 +1,27 @@
+#yaml sample file
+#STRUCTURE
+#wol:         required, all other keys are in this.
+#  default:   optional.
+#  hosts:     required. map hostname to mac
+#  groups:    optional. to wake multiple hosts in one-shot.
+
+#DETAILS
+# default:
+#   port:       port to send magic packet. default=7
+#   ip:         target ip address(broadcast), default="255.255.255.255"
+#               you can use CIDR format. (eg. "192.168.0.0/24")
+# hosts:
+#   <hostname>: <hostname> which you want to use (case sensitive)
+#     mac:      required. target mac(=hardware/physical/ether) address
+#     ip:       optional. broadcast address for this host. override default.
+# groups:
+#   <groupname>:  <groupname> which you want use (you can use same string to <hostname>)
+#     - <hostname 1>  wake target host 1
+#     ...
+#     - <hostname n>  wake target host n
+#                     these hostnames should be specified in 'hosts:' chank.
+
 wol:
-  version: 1
   default:
     port: 7
     ip: "255.255.255.255"
@@ -10,10 +32,10 @@ wol:
       mac: "AB:CD:EF:01:12:50"
     srv1:
       mac: "12:34:56:78:90:AA"
-      ip: "172.16.255.255"
+      ip: "172.31.255.255"
     srv2:
       mac: "12:34:56:78:90:BB"
-      ip: "172.16.255.255"
+      ip: "172.16.0.1/12"
   groups:
     pcs:
       - pc1
@@ -22,9 +44,13 @@ wol:
       - srv1
       - srv2
     all:
+    # hosts can be set in multiple groups
       - pc1
       - pc2
       - srv1
       - srv2
+#   all:        this is NO FUNCTIONAL except dns returns ip.
+#     - pcs     <- groupname
+#     - servers
 
 

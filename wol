@@ -6,41 +6,107 @@ from traceback import print_exc
 
 import yaml
 import argparse
-import sys, os
+import sys
+import pathlib
 import subprocess
 import re
 
+version_str = '0.0.1'
+
+#default config file path
+# def_conf = "~/.wol_conf.yaml"
+def_conf = pathlib.Path.home() / ".wol_conf.yaml"
+
+#default broadcast ip address
+def_ip_addr = "255.255.255.255"
+
+#minimal yaml conf structure
+defaults = {
+        'wol': {
+            #version:1 is now not used. this is a placeholder for future.
+            'version': 1,
+            'default':{
+                'port': 7,
+                'ip': def_ip_addr   #do not omit 'def_ip_addr' (used as function's default value)
+            },
+            'hosts':{},
+            'groups': {}
+            }
+        }
+
+#global variables for flags
 f_verbose = False
 f_target_as_mac = False
-def_ip_addr = "255.255.255.255"
-version_str = '0.0.1-alpha'
 
+#prepare regex for format check
+re_mac = re.compile(r'[:_-]'.join((r'[0-9A-Fa-f]{2}',) * 6))
+#re_ipv4: to suppress group grabbing, "(?" is used 
+re_ipv4 = re.compile(r'\.'.join((r'(?:[0-9]|[1-9][0-9]|1[0-9][0-9]|2(?:[0-4][0-9]|5[0-5]))',) * 4))
+re_subnet = re.compile(r"(%s)\/(\d{1,2})" % (re_ipv4.pattern))
+re_sub_or_ip = re.compile(r"%s(?:\/\d{1,2})?" % (re_ipv4.pattern))
+#re_awk: to grab ip/mac as group, each regex is put in "()"
+re_awk = r'({}) ({})'.format(re_ipv4.pattern, re_mac.pattern)
+
+#verbose print method
 def v_print(msg):
     global f_verbose
     if f_verbose:
         print(msg)
 
+def make_broadcast_ip(host):
+    if re.fullmatch(re_ipv4, host):
+        #no cidr suffix: just return host as broadcast ip
+        return host
+    elif re.fullmatch(re_subnet, host):
+        #cidr format.
+        (subnet, mask) = host.split("/")
+        subnet_div = subnet.split(".")
+
+        if not 0 <= int(mask) <= 32:
+            print("error: invalid CIDR mask: {}".format(host), file=sys.stderr)
+            return None
+
+        bytes_subnet = b''
+        for ch in subnet_div:
+            bytes_subnet += struct.pack('B', int(ch))
+        
+        bitmask = struct.pack('!L', ((1 << (32-int(mask)))-1))
+
+        broadcast_b = b''
+        for i in range(0, 4):
+            broadcast_b += struct.pack("B", bytes_subnet[i] | bitmask[i])
+        
+        ret_val = socket.inet_ntoa(broadcast_b)
+        v_print("broadcast for {} -> {}".format(host, ret_val))
+
+        return ret_val
+    else:
+        print("error: no ipv4/CIDR format: {}".format(host), file=sys.stderr)
+        return None
+
+
+#get mac address from host(mac/ip/FQDN)
 def get_mac_addr(host):
     '''
     host    host string to be resolve to hardware addr
             mac/ipv4/hostname are supportted
     '''
-    #prepare regex
-    re_mac = re.compile(r'[:_-]'.join((r'[0-9A-Fa-f]{2}',) * 6))
-    re_ipv4 = re.compile(r'\.'.join((r'(?:[0-9]|[1-9][0-9]|1[0-9][0-9]|2(?:[0-4][0-9]|5[0-5]))',) * 4))
-    re_awk = r'({}) ({})'.format(re_ipv4.pattern, re_mac.pattern)
-
     ip_addr = ""
     arp_table = {}
 
     if re.match(re_mac, host):
         #host == mac addr
-        #nothing to do
+        #nothing to do, return mac
         return host
     else:
         #host is not mac, resolve to ipv4
-        #if host == ipv4, this method through 'host'
-        ip_addr = socket.gethostbyname(host)
+        try:
+            #if host == ipv4, this method just return 'host'
+            ip_addr = socket.gethostbyname(host)
+        except Exception as e:
+            print("error: host {}: {}".format(host, e), file=sys.stderr)
+            raise KeyError
+        
         if(ip_addr != host):
             v_print("host {} -> ipv4 {}".format(host, ip_addr))
         
@@ -51,27 +117,28 @@ def get_mac_addr(host):
         
         for arp in arps:
             arp_table.update({
+                #ipv4: mac
                 arp[0]: arp[1]
             })
 
+        #raise KeyError if not found
+        #almost always faild, due to updating mac in arp table for downed host to "FAILD".
         return arp_table[ip_addr]
 
+#send magic packets
 def send_magic_packet(mac, ip=def_ip_addr, port=7):
     '''
     mac     target hardware adderss(MAC) to be wake
-    ip      target ip (default="255.255.255.255")
+    ip      target broadcast ip (default="255.255.255.255")
     port    using port (default=7)
     '''
-    #mac address check
-    re_mac = re.compile(r'[:_-]'.join((r'[0-9A-Fa-f]{2}',) * 6))
-
     if not re.fullmatch(re_mac, mac):
-        print("invalid MAC address: {}".format(mac), file=sys.stderr)
-        exit(1)
+        print("error: invalid MAC address: {}".format(mac), file=sys.stderr)
+        return
     mac_mod = mac.upper().replace("-", "").replace("_", "").replace(":", "")
 
     #prepare magic packet
-    buf = b'f' * 12 + (mac_mod * 20).encode()
+    buf = b'ff' * 6 + (mac_mod * 16).encode()   #at least, target MAC * 16 required
     magic_pc = b''
     for i in range(0, len(buf), 2):
         magic_pc += struct.pack('B', int(buf[i:i+2], 16))
@@ -79,28 +146,17 @@ def send_magic_packet(mac, ip=def_ip_addr, port=7):
     #sending magic packet
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        v_print("sending magic packet to {}:{} with mac {}".format(ip, port, mac))
+        v_print("sending magic packet to {}:{} / mac {}".format(ip, port, mac))
         s.sendto(magic_pc, (ip, port))
 
+#load config file
 def load_yaml(filepath):
     with open(filepath, 'r') as f:
         data = yaml.safe_load(f)
-        v_print("config loaded from {}".format(filepath))
+        v_print("config file: {}".format(filepath))
     return data
 
-def def_settings():
-    defaults = {
-            'wol': {
-                'version': 1,
-                'default':{
-                    'port': 7,
-                    'ip': def_ip_addr
-                },
-                'hosts':{}
-                }
-            }
-    return defaults
-
+#select broadcast ip
 def sel_ip(default_ip, specify_ip, option_ip):
     if option_ip:
         return option_ip
@@ -108,56 +164,67 @@ def sel_ip(default_ip, specify_ip, option_ip):
         return specify_ip
     return default_ip
 
+
+#main routine
 if __name__ == "__main__":
 
+    #arugment parser
     parser = argparse.ArgumentParser(description = "WakeOnLan Magic packet send command")
     parser.add_argument('Target', type=str, nargs='*', help='Target names to be waked up')
     parser.add_argument('--version', action='version', version=version_str)
     parser.add_argument('-p', '--port', type=int, help='use port number')
     parser.add_argument('-i', '--ip', type=str, help="ip address to send (broadcast)")
-    parser.add_argument('-f', '--file', type=str, default="wol_macs.yaml", help='setting yaml file')
+    parser.add_argument('-f', '--file', type=str, help='setting yaml file')
     parser.add_argument('-l', '--list', action='store_true', help='list hosts/macs in config and exit')
-    parser.add_argument('-g', '--group', action='store_true', help='treat <Target> as groupname')
+    parser.add_argument('-g', '--group', action='store_true', help='treat <Target> as group name')
     parser.add_argument('-t', '--target-as-mac', action='store_true', help='treat <Target> as MAC address')
     parser.add_argument('-v', '--verbose', action='store_true', help='verbose output')
+    #parser.add_argument('--test', type=str)
 
     args = vars(parser.parse_args())
 
-    # for check addresses
-    re_mac = re.compile(r'[:_-]'.join((r'[0-9A-Fa-f]{2}',) * 6))
-    re_ipv4 = re.compile(r'\.'.join((r'(?:[0-9]|[1-9][0-9]|1[0-9][0-9]|2(?:[0-4][0-9]|5[0-5]))',) * 4))
+
+    #if args['test']:
+    #    print(make_broadcast_ip(args['test']))
+    #    exit(0)
 
     #option parse
     if args['verbose']:
         f_verbose = True
 
+    #assert check: incompatible options
     if args['target_as_mac']:
         if args['group']:
-            print("error: cannot use -t/--target-as-mac and -g/--group as same time.", file=sys.stderr)
+            print("error: cannot use -t/--target-as-mac and -g/--group at the same time.", file=sys.stderr)
             exit(1)
         f_target_as_mac = True
     
-    #no targets or options
+    #no targets or options: show usage and exit
     if len(args['Target']) == 0 and args['list']==False:
         parser.print_usage()
         exit(0)
 
     try:
         #parse config file
-        data = def_settings() | load_yaml(args['file'])
+        if args['file'] != None:
+            conf = args['file']
+        else:
+            conf = def_conf
+        data = defaults | load_yaml(conf)
         port = 0
-        dip_addr = ""
-        oip_addr = ""
-        #print(data)
+        dip_addr = ""   #default broadcast ip_address
+        oip_addr = ""   #option-specified broadcast ip_address
 
         #--list option: list hosts and exit
         if args['list']:
             print("Hosts:")
             for k in data['wol']['hosts'].keys():
                 print("\t{}".format(k))
-            print("Groups:")
-            for k in data['wol']['groups']:
-                print("\t{}".format(k))
+
+            if 'groups' in data['wol']:
+                print("Groups:")
+                for k in data['wol']['groups']:
+                    print("\t{}".format(k))
             exit(0)
 
         #port selection
@@ -167,42 +234,44 @@ if __name__ == "__main__":
             port = data['wol']['default']['port']
         v_print("using port {}".format(port))
 
-        #ip address selection
+        #broadcast ip address search
         if args['ip'] != None:
-            if re.fullmatch(re_ipv4,args['ip']):
+            if re.fullmatch(re_sub_or_ip, args['ip']):
                 #use command option
-                oip_addr = args['ip']
+                oip_addr = make_broadcast_ip(args['ip'])
 
-        dip_addr = data['wol']['default']['ip']
+        dip_addr = make_broadcast_ip(data['wol']['default']['ip'])
 
         #magic packets to Target
-        targets = ()
+        targets = []
         for T in args["Target"]:
             if args['group']:
                 # target is groups
                 try:
                     targets = data['wol']['groups'][T]
                 except KeyError:
-                    print("unknown group: {}".format(T), file=sys.stderr)
+                    print("error: unknown group: {}".format(T), file=sys.stderr)
                     continue
             else:
                 #target is hostname
                 targets = [T]
         
             if f_target_as_mac:
-                # Target = mac addr
+                # Target == mac addr
                 v_print("MAC {}".format(T))
                 send_magic_packet(T, ip=sel_ip(dip_addr, None, oip_addr), port = port)
             else:
                 # Target = host name
                 for targ in targets:
-                    sip_addr = ""
+                    sip_addr = ""   # specified broadcast ip_address in conf
                     try:
                         if targ in data['wol']['hosts'].keys():
+                            #hostname found in config
                             mac_addr = data['wol']['hosts'][targ]['mac']
+                            #if also specify broadcast ip, get it
                             if 'ip' in data['wol']['hosts'][targ].keys():
-                                sip_addr = data['wol']['hosts'][targ]['ip']
-                                v_print("found host {} with ip {}".format(targ, sip_addr))
+                                sip_addr = make_broadcast_ip(data['wol']['hosts'][targ]['ip'])
+                                v_print("{}\t: broadcast ip = {}".format(targ, sip_addr))
                         else:
                             #if no macs found, raise KeyError inside
                             mac_addr = get_mac_addr(targ)
@@ -212,9 +281,10 @@ if __name__ == "__main__":
                             raise KeyError
                         
                     except KeyError:
-                        print("unknown target: {}".format(targ), file=sys.stderr)
+                        print("error: unknown target: {}".format(targ), file=sys.stderr)
                         continue
                     
+                    #send magic packet
                     v_print("{}\t: mac = {}".format(targ, mac_addr))
                     send_magic_packet(mac_addr,ip=sel_ip(dip_addr, sip_addr, oip_addr), port=port)
         v_print("done")
