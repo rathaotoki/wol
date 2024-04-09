@@ -9,6 +9,17 @@ send magic packets.
 
 ## How To Use
 
+```shell:install
+#install
+chmod +x wol
+mv wol /anywhere/you/want/with/path
+
+cp wol_macs-sample.yaml ~/.wol_macs.yaml
+vi ~/.wol_macs.yaml
+#please edit config
+```
+
+
 command line:
 ```shell:example
 #wake pc1, srv1
